@@ -1,4 +1,4 @@
-# Intel<sup>®</sup> Analysis Communication Agent Reference Solution 
+# Analysis Communication Agent Reference Solution 
 
 ## Introduction
 Analysis Communication Agent enables performance analysis of custom embedded operating systems (OS) or real-time operating systems (RTOS) and the applications running on them using Intel<sup>®</sup> VTune<sup>TM</sup> Profiler. This reference implementation provides guidance on enabling a sampling collector for this purpose. 
