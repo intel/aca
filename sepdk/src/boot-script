@@ -1,0 +1,687 @@
+#!/bin/sh
+
+#
+# File: boot-script
+#
+# Description: script to install/uninstall the SEP driver boot script
+#
+# Version: 1.8
+#
+# Copyright(C) 2008-2018 Intel Corporation.  All Rights Reserved.
+#
+#     This file is part of SEP Development Kit
+#
+#     SEP Development Kit is free software; you can redistribute it
+#     and/or modify it under the terms of the GNU General Public License
+#     version 2 as published by the Free Software Foundation.
+#
+#     SEP Development Kit is distributed in the hope that it will be useful,
+#     but WITHOUT ANY WARRANTY; without even the implied warranty of
+#     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#     GNU General Public License for more details.
+#
+#     You should have received a copy of the GNU General Public License
+#     along with SEP Development Kit; if not, write to the Free Software
+#     Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+#
+#     As a special exception, you may use this file as part of a free software
+#     library without restriction.  Specifically, if other files instantiate
+#     templates or use macros or inline functions from this file, or you compile
+#     this file and link it with other files to produce an executable, this
+#     file does not by itself cause the resulting executable to be covered by
+#     the GNU General Public License.  This exception does not however
+#     invalidate any other reasons why the executable file might be covered by
+#     the GNU General Public License.
+#
+
+# set the path to include "standard" locations so commands below can be found
+PATH="/sbin:/usr/sbin:/bin:/usr/bin/:/usr/local/sbin:/usr/local/bin:/usr/local/gnu/bin:.:"${PATH}
+export PATH
+DEFAULT_START_RUNLEVEL="2 3 4 5"
+DEFAULT_STOP_RUNLEVEL="0"
+
+# ------------------------------ CONSTANTS -----------------------------------
+
+# basic name of driver
+DRIVER_NAME=sep5
+# default driver device group
+DEFAULT_GROUP=${GROUP:-root}
+# default driver device permissions
+DEFAULT_PERMS=660
+
+# ------------------------------- OUTPUT -------------------------------------
+
+print_msg()
+{
+  MSG="$*"
+  echo "$MSG"
+}
+
+print_nnl()
+{
+  MSG="$*"
+  echo -n "$MSG"
+}
+
+print_err()
+{
+  MSG="$*"
+  if [ -w /dev/stderr ] ; then
+    echo "$MSG" >> /dev/stderr
+  else
+    echo "$MSG"
+  fi
+}
+
+# ------------------------------ COMMANDS ------------------------------------
+
+GREP="grep"
+LN="ln"
+RM="rm"
+SED="sed"
+SU="su"
+WHICH="which"
+UPDATERCD="update-rc.d"
+
+
+COMMANDS_TO_CHECK="${LN} ${RM} ${SED}"
+
+#
+# Note: Busybox has a restricted shell environment, and
+#       conventional system utilities may not be present;
+#       so need to account for this ...
+#
+
+# busybox binary check
+BUSYBOX_SHELL=` ${GREP} --help 2>&1 | ${GREP} BusyBox`
+
+if [ -z "${BUSYBOX_SHELL}" ] ; then
+  COMMANDS_TO_CHECK="${SU} ${COMMANDS_TO_CHECK}"
+fi
+
+# if any of the COMMANDS_TO_CHECK are not executable, then exit script
+OK="true"
+for c in ${COMMANDS_TO_CHECK} ; do
+  CMD=`${WHICH} $c 2>&1` ;
+  if [ -z "${CMD}" ] ; then
+    OK="false"
+    print_err "ERROR: unable to find command \"$c\" !"
+  fi
+done
+if [ ${OK} != "true" ] ; then
+  print_err "Please add the location to the above commands to your PATH and re-run the script ... exiting."
+  exit 255
+fi
+
+# ------------------------------ VARIABLES -----------------------------------
+
+SCRIPT=$0
+SCRIPT_ARGS="$@"
+PREBUILT_DRIVER_DIRECTORY=`dirname $PWD/$SCRIPT`
+DEFAULT_REDHAT_BOOT_INSTALL="/etc/rc.d/init.d"
+DEFAULT_SUSE_BOOT_INSTALL="/etc/init.d"
+DEFAULT_DEBIAN_BOOT_INSTALL="/etc/init.d"
+PER_USER_MODE=""
+
+# ------------------------------ FUNCTIONS -----------------------------------
+
+# function for taking first paratemer
+get_first() {
+  echo $1
+}
+
+# function for checking file availability
+exit_if_file_inaccessible()
+{
+  proposed_file=$1
+  attr=${2:-f}
+  # check for executable
+  if [ "$attr" = "x" ] ; then
+    file=`${WHICH} $proposed_file 2>&1`
+    if [ ! -$attr "$file" ] ; then
+      echo "ERROR: file \"$proposed_file\" either does not exist or is not an executable!"
+      exit 111
+    fi
+  # otherwise assume regular file
+  else
+    if [ ! -$attr "$proposed_file" ] ; then
+      echo "ERROR: \"$proposed_file\" is either not a file or is not accessible!"
+      exit 111
+    fi
+  fi
+}
+
+
+# function to show usage and exit
+
+print_usage_and_exit()
+{
+  err=${1:-0}
+  print_msg ""
+  print_msg "Usage: $0 [ option ]"
+  print_msg ""
+  print_msg " where \"option\" is one of the following:"
+  print_msg ""
+  print_msg "    -h | --help"
+  print_msg "      prints out usage"
+  print_msg ""
+  print_msg "    -i | --install"
+  print_msg "      configures the ${DRIVER_NAME} boot script as per options below"
+  print_msg "      and then installs it in the appropriate system directory"
+  print_msg ""
+  print_msg "    -d | --driver-directory [ prebuilt-drivers-directory ]"
+  print_msg "      configures the ${DRIVER_NAME} boot script to use the specified"
+  print_msg "      prebuilt driver directory; if this option is not provided,"
+  print_msg "      then the directory,"
+  print_msg "          $PREBUILT_DRIVER_DIRECTORY"
+  print_msg "       will be used; implies installation"
+  print_msg ""
+  print_msg "    -g | --group group"
+  print_msg "      configures the ${DRIVER_NAME} boot script to restrict driver access to users in"
+  print_msg "      the specified group; if this option is not provided, the group \"${DEFAULT_GROUP}\""
+  print_msg "      will be used; implies installation"
+  print_msg ""
+  print_msg "    -p | --perms fileperms"
+  print_msg "      configures the ${DRIVER_NAME} boot script to restrict driver access based on the"
+  print_msg "      specified file permissions; if this option is not provided, then file"
+  print_msg "      permissions \"${DEFAULT_PERMS}\" (or equivalently, \"ug+rw\") will be used"
+  print_msg "      implies installation"
+  print_msg ""
+  print_msg "    -u | --uninstall"
+  print_msg "      uninstalls a previously installed ${DRIVER_NAME} driver boot script"
+  print_msg ""
+  print_msg "    -pu | --per-user"
+  print_msg "      install the sampling driver in secure mode to enable per user collection"
+  print_msg ""
+  print_msg "    -q | --query"
+  print_msg "      returns 0 if boot-script of this driver's version is already loaded, non-zero otherwise;"
+  print_msg ""
+  print_msg "    --c-compiler=c_compiler"
+  print_msg "      \"c_compiler\" is the C compiler used to compile the kernel;"
+  print_msg "      this defaults to \"gcc\""
+  print_msg ""
+  print_msg "    --make-command=make_command"
+  print_msg "      \"make_command\" is the C compiler used to compiis the make command used to build the kernel;"
+  print_msg "      this defaults to \"make\""
+  print_msg ""
+  exit $err
+}
+
+# --------------------------------- MAIN -------------------------------------
+
+# must specifiy at least one option
+if [ $# -lt 1 ] ; then
+  print_usage_and_exit 0
+fi
+
+# if only help option specified, then show options
+if [ $# -eq 1 ] ; then
+  case "$1" in
+    -h | --help)
+      print_usage_and_exit 0
+      ;;
+  esac
+fi
+
+
+# parse the options
+install_boot_script=0
+uninstall_boot_script=0
+override_group=0
+override_perms=0
+query_boot_script=0
+while [ $# -gt 0 ] ; do
+  case "$1" in
+    -d | --driver-directory)
+      DRIVER_DIR=$2
+      if [ -z "$DRIVER_DIR" ] ; then
+        print_err ""
+        print_err "ERROR: must provide location of pre-built driver directory"
+        print_usage_and_exit 254
+      fi
+      install_boot_script=1
+      shift
+      ;;
+    -g | --group)
+      DRIVER_GROUP=$2
+      if [ -z "$DRIVER_GROUP" ] ; then
+        print_err ""
+        print_err "ERROR: must provide a group"
+        print_usage_and_exit 254
+      fi
+      override_group=1
+      install_boot_script=1
+      shift
+      ;;
+    -p | --perms)
+      DRIVER_PERMS=$2
+      if [ -z "$DRIVER_PERMS" ] ; then
+        print_err ""
+        print_err "ERROR: must provide the file permissions"
+        print_usage_and_exit 254
+      fi
+      override_perms=1
+      install_boot_script=1
+      shift
+      ;;
+    -i | --install)
+      install_boot_script=1
+      ;;
+    -u | --uninstall)
+      uninstall_boot_script=1
+      ;;
+    -pu | --per-user)
+      PER_USER_MODE=" -pu "
+      ;;
+    -q | --query)
+      query_boot_script=1
+      ;;
+    --c-compiler=*)
+       c_compiler=`echo $1 | sed s?^--c-compiler=??g`
+      ;;
+    --make-command=*)
+       make_command=`echo $1 | sed s?^--make-command=??g`
+       ;;
+    *)
+      print_err ""
+      print_err "ERROR: unrecognized option \"$1\""
+      print_usage_and_exit 254
+      ;;
+  esac
+  shift
+done
+
+# set install options based on user input ...
+DRIVER_DIR=${DRIVER_DIR:-$PREBUILT_DRIVER_DIRECTORY}
+DRIVER_GROUP=${DRIVER_GROUP:-$DEFAULT_GROUP}
+DRIVER_PERMS=${DRIVER_PERMS:-$DEFAULT_PERMS}
+
+# check if USER is root
+check_root() {
+	if [ -z "${BUSYBOX_SHELL}" ] ; then
+	  if [ "${USER}x" != "rootx" ] ; then
+	    if [ ! -w /dev ] ; then
+	      print_msg "NOTE:  super-user or \"root\" privileges are required in order to continue."
+	      print_nnl "Please enter \"root\" "
+	      exec ${SU} -c "/bin/sh ${SCRIPT} ${SCRIPT_ARGS}"
+	      print_msg ""
+	      exit 0
+	    fi
+	  fi
+	fi
+}
+
+
+# ---------------------------- BOOT SCRIPT BEGIN -----------------------------
+
+create_script()
+{
+  SCRIPT=$1
+  ${RM} -f ${SCRIPT}
+cat > $SCRIPT <<EOF
+#!/bin/sh
+
+#
+# File: ${DRIVER_NAME}
+#
+# Description: script to load ${DRIVER_NAME} driver at boot time
+#
+# Version: 1.5
+#
+# Copyright(C) 2008-2018 Intel Corporation.  All Rights Reserved.
+# 
+#     This file is part of SEP Development Kit
+# 
+#     SEP Development Kit is free software; you can redistribute it
+#     and/or modify it under the terms of the GNU General Public License
+#     version 2 as published by the Free Software Foundation.
+# 
+#     SEP Development Kit is distributed in the hope that it will be useful,
+#     but WITHOUT ANY WARRANTY; without even the implied warranty of
+#     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#     GNU General Public License for more details.
+# 
+#     You should have received a copy of the GNU General Public License
+#     along with SEP Development Kit; if not, write to the Free Software
+#     Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+# 
+#     As a special exception, you may use this file as part of a free software
+#     library without restriction.  Specifically, if other files instantiate
+#     templates or use macros or inline functions from this file, or you compile
+#     this file and link it with other files to produce an executable, this
+#     file does not by itself cause the resulting executable to be covered by
+#     the GNU General Public License.  This exception does not however
+#     invalidate any other reasons why the executable file might be covered by
+#     the GNU General Public License.
+#
+
+#
+# chkconfig: 2345 30 40
+#
+### BEGIN INIT INFO
+# Provides: ${DRIVER_NAME}
+# Required-Start: \$syslog \$remote_fs
+# Required-Stop: \$syslog
+# Default-Start: $DEFAULT_START_RUNLEVEL
+# Default-Stop: $DEFAULT_STOP_RUNLEVEL
+# Short-Description: loads/unloads the ${DRIVER_NAME} driver at boot/shutdown time
+# Description: loads/unloads the ${DRIVER_NAME} driver at boot/shutdown time
+### END INIT INFO
+# name of the driver
+
+DRIVER_NAME=${DRIVER_NAME}
+
+# location where the pre-built drivers are installed
+
+DRIVER_DIR=${DRIVER_DIR}
+
+# name of driver load/unload and build scripts
+
+DRIVER_NOT_FOUND_ERROR_CODE=235
+
+INSMOD_SCRIPT=insmod-sep
+
+RMMOD_SCRIPT=rmmod-sep
+
+BUILD_SCRIPT=build-driver
+
+BUILD_OPTIONS="$BUILD_OPTIONS"
+
+
+# source the function library, if it exists
+
+[ -r /etc/rc.d/init.d/functions ] && . /etc/rc.d/init.d/functions
+
+# check whether directories and scripts are available
+
+if [ ! -d \${DRIVER_DIR} ] ; then
+  echo "Unable to access the ${DRIVER_NAME} driver directory \"\${DRIVER_DIR}\" !"
+  exit 101
+fi
+
+if [ ! -f \${DRIVER_DIR}/\${INSMOD_SCRIPT} ] ; then
+  echo "The ${DRIVER_NAME} load script \"\${DRIVER_DIR}/\${INSMOD_SCRIPT}\" does not exist!"
+  exit 102
+fi
+
+if [ ! -f \${DRIVER_DIR}/\${RMMOD_SCRIPT} ] ; then
+  echo "The ${DRIVER_NAME} unload script \"\${DRIVER_DIR}/\${RMMOD_SCRIPT}\" does not exist!"
+  exit 103
+fi
+
+check_build_script() {
+    if [ ! -f \${DRIVER_DIR}/\${BUILD_SCRIPT} ] ; then
+        echo "The ${DRIVER_NAME} build script \"\${DRIVER_DIR}/\${BUILD_SCRIPT}\" does not exist!"
+        exit 106
+    fi
+}
+
+# define function for drivers rebuild
+
+build_driver() {
+    check_build_script
+    (cd \${DRIVER_DIR} && ./\${BUILD_SCRIPT} \${BUILD_OPTIONS})
+    RETVAL=\$?
+    return \$RETVAL
+}
+
+# define function to insmod the driver
+
+insmod() {
+    (cd \${DRIVER_DIR} && ./\${INSMOD_SCRIPT} ${INSMOD_OPTIONS})
+    return \$?
+}
+
+# define function to load the driver
+
+start() {
+    echo "Loading the ${DRIVER_NAME} driver: "
+    insmod
+    RETVAL=\$?
+
+    if [ \${RETVAL} -ne 0 ]; then
+        if [ \${RETVAL} -eq \${DRIVER_NOT_FOUND_ERROR_CODE} ]; then
+            build_driver
+            insmod
+            RETVAL=\$?
+        else
+            if [ -f \${DRIVER_DIR}/\${BUILD_SCRIPT} ] ; then
+                DRIVER_FILENAME=\`\${DRIVER_DIR}/\${BUILD_SCRIPT} --print-driver-name\`
+            else
+                DRIVER_FILENAME=non_existent_file_name
+            fi
+            if ! [ -f \${DRIVER_DIR}/\${DRIVER_FILENAME} ]; then
+                echo "Driver for current kernel is not found. Trying to build driver..."
+                build_driver
+                insmod
+                RETVAL=\$?
+            fi
+        fi
+    fi
+
+    return \$RETVAL
+}
+
+# define function to unload the driver
+
+stop() {
+    echo "Unloading ${DRIVER_NAME} driver: "
+    (cd \${DRIVER_DIR} && ./\${RMMOD_SCRIPT})
+    RETVAL=\$?
+    return \$RETVAL
+}
+
+# define function to query whether driver is loaded
+
+status() {
+    (cd \${DRIVER_DIR} && ./\${INSMOD_SCRIPT} -q)
+    ERR=\$?
+    if [ \$ERR -eq 0 ] ; then
+      RETVAL=0
+    else
+      RETVAL=3
+    fi
+    return \$RETVAL
+}
+
+# parse command-line options and execute
+
+RETVAL=0
+
+case "\$1" in
+	start)
+	    start
+	    ;;
+	stop)
+	    stop
+	    ;;
+	restart)
+	    stop
+	    start
+	    ;;
+	status)
+	    status
+	    ;;
+	*)
+	    echo "Usage: \$0 {start|stop|restart|status}"
+	    exit 1
+esac
+
+exit \$RETVAL
+EOF
+  chmod a+rx $SCRIPT
+}
+
+# ---------------------------- BOOT SCRIPT END -------------------------------
+
+# check which distro (hack!)
+set_environment() {
+	# setting global variables used by other functions
+	if [ -d ${DEFAULT_REDHAT_BOOT_INSTALL} ] ; then
+	  LINUX_DISTRO="RedHat"
+	  DEFAULT_BOOT_INSTALL=${DEFAULT_REDHAT_BOOT_INSTALL}
+	  RUNLEVEL_DIR=/etc/rc.d
+	  RELATIVE_BOOT_INSTALL=../init.d
+	else
+	  LSB_BIN=/usr/lib/lsb
+	  if [ -x ${LSB_BIN}/install_initd -a -x ${LSB_BIN}/remove_initd ] ; then
+	    LINUX_DISTRO="SuSE"
+	    DEFAULT_BOOT_INSTALL=${DEFAULT_SUSE_BOOT_INSTALL}
+	    RUNLEVEL_DIR=/etc/init.d
+	    RELATIVE_BOOT_INSTALL=.
+	  else
+	    LINUX_DISTRO="Debian"
+	    DEFAULT_BOOT_INSTALL=${DEFAULT_DEBIAN_BOOT_INSTALL}
+	    RUNLEVEL_DIR=/etc
+	    RELATIVE_BOOT_INSTALL=../init.d
+	  fi
+	fi
+}
+
+#query if boot script of same version is already installed
+run_query_boot_script() {
+	if [ -f ${DEFAULT_BOOT_INSTALL}/${DRIVER_NAME} ] ; then
+	  print_msg "Boot script ${DRIVER_NAME} is already installed: ${DEFAULT_BOOT_INSTALL}/${DRIVER_NAME}"
+	else
+	  print_msg "Boot script ${DRIVER_NAME} is not installed!"
+	  exit 107
+	fi
+}
+
+# remove boot script, if it was previously installed
+run_uninstall_boot_script() {
+	if [ -f ${DEFAULT_BOOT_INSTALL}/${DRIVER_NAME} ] ; then
+	  print_nnl "Removing ${DRIVER_NAME} boot script and symlinks for runlevels 2 through 5 ... "
+	  sleep 1
+	  if [ "${LINUX_DISTRO}"x = "SuSEx" ] ; then
+	    ${LSB_BIN}/remove_initd ${DEFAULT_BOOT_INSTALL}/${DRIVER_NAME}
+	    err=$?
+	    if [ $err -ne 0 ] ; then
+	      print_err "${LSB_BIN}/remove_initd returned error $err ... exiting."
+	      exit 105
+	    fi
+	  elif [ "${LINUX_DISTRO}"x = "RedHatx" -o "${LINUX_DISTRO}"x = "Debianx" ] ; then
+	      UPDATERCD_CMD=`${WHICH} ${UPDATERCD} 2>&1`
+	      if [ "${LINUX_DISTRO}"x = "Debianx" -a -n "${UPDATERCD_CMD}" ]; then
+	        ${UPDATERCD} -f ${DRIVER_NAME} remove
+	      else
+	        [ -w ${RUNLEVEL_DIR}/rc2.d ] && [ -f ${RUNLEVEL_DIR}/rc2.d/S99${DRIVER_NAME} ] && ${RM} -f ${RUNLEVEL_DIR}/rc2.d/S99${DRIVER_NAME}
+	        [ -w ${RUNLEVEL_DIR}/rc3.d ] && [ -f ${RUNLEVEL_DIR}/rc3.d/S99${DRIVER_NAME} ] && ${RM} -f ${RUNLEVEL_DIR}/rc3.d/S99${DRIVER_NAME}
+	        [ -w ${RUNLEVEL_DIR}/rc4.d ] && [ -f ${RUNLEVEL_DIR}/rc4.d/S99${DRIVER_NAME} ] && ${RM} -f ${RUNLEVEL_DIR}/rc4.d/S99${DRIVER_NAME}
+	        [ -w ${RUNLEVEL_DIR}/rc5.d ] && [ -f ${RUNLEVEL_DIR}/rc5.d/S99${DRIVER_NAME} ] && ${RM} -f ${RUNLEVEL_DIR}/rc5.d/S99${DRIVER_NAME}
+	      fi
+	  else
+	    print_nnl "WARNING: unable to remove symlinks ... "
+	  fi
+	  [ -w ${DEFAULT_BOOT_INSTALL} ] && ${RM} -f ${DEFAULT_BOOT_INSTALL}/${DRIVER_NAME}
+	  print_msg "done."
+	else
+	  print_msg "No previously installed ${DRIVER_NAME} driver boot script was found."
+    fi
+}
+
+# install boot script
+run_install_boot_script() {
+	# check options
+	if [ ! -d ${DRIVER_DIR} ] ; then
+	  print_err ""
+	  print_err "ERROR: the prebuilt driver directory,"
+	  print_err "          $DRIVER_DIR"
+	  print_err "       is not accessible by root user!"
+	  print_err ""
+	  print_err "Please specifiy a valid directory and then re-run this script."
+	  print_err ""
+	  exit 101
+	fi
+	print_msg "Configuring ${DRIVER_NAME} boot script with the following options:"
+	print_msg "    driver files = ${DRIVER_DIR}"
+	INSMOD_OPTIONS=""
+	if [ $override_group -eq 1 ] ; then
+	  print_msg "    driver group = ${DRIVER_GROUP}"
+	  INSMOD_OPTIONS="-g ${DRIVER_GROUP}"
+	fi
+	if [ $override_perms -eq 1 ] ; then
+	  print_msg "    driver perms = ${DRIVER_PERMS}"
+	  INSMOD_OPTIONS="${INSMOD_OPTIONS} -p ${DRIVER_PERMS}"
+	fi
+	INSMOD_OPTIONS="${INSMOD_OPTIONS} ${PER_USER_MODE}"
+
+	if [ -n "$c_compiler" ]
+	then
+	  exit_if_file_inaccessible $(get_first $c_compiler) x
+	fi
+	
+	if [ -n "${make_command}" ] ; then
+	  exit_if_file_inaccessible $make_command x
+	fi
+	BUILD_OPTIONS="${PER_USER_MODE} -ni"
+	
+	if [ -n "$c_compiler" ]; then
+	    BUILD_OPTIONS="--c-compiler=$c_compiler $BUILD_OPTIONS"
+	fi
+	
+	if [ -n "$make_command" ]; then
+	    BUILD_OPTIONS="--make-command=$make_command $BUILD_OPTIONS"
+	fi
+	
+	# create the boot script in target directory or exit if error
+	if [ -w ${DEFAULT_BOOT_INSTALL} ] ; then
+	  print_nnl "Creating boot script ${DEFAULT_BOOT_INSTALL}/${DRIVER_NAME} ... "
+	  create_script ${DEFAULT_BOOT_INSTALL}/${DRIVER_NAME}
+	  if [ -r ${DEFAULT_BOOT_INSTALL}/${DRIVER_NAME} ] ; then
+	    print_msg "done."
+	  else
+	    print_err "Unable to create boot script ... exiting."
+	    exit 104
+	  fi
+	else
+	  print_err "Unable to write to ${DEFAULT_BOOT_INSTALL} ... exiting."
+	  exit 104
+	fi
+	# configure autoload ...
+	print_nnl "Configuring autoload of ${DRIVER_NAME} driver for runlevels 2 through 5 ... "
+	sleep 1
+	if [ "${LINUX_DISTRO}"x = "SuSEx" ] ; then
+	  ${LSB_BIN}/install_initd ${DEFAULT_BOOT_INSTALL}/${DRIVER_NAME}
+	elif [ "${LINUX_DISTRO}"x = "RedHatx" -o "${LINUX_DISTRO}"x = "Debianx" ] ; then
+	  UPDATERCD_CMD=`${WHICH} ${UPDATERCD} 2>&1`
+	  if [ "${LINUX_DISTRO}"x = "Debianx" -a -n "${UPDATERCD_CMD}" ]; then
+	      ${UPDATERCD} ${DRIVER_NAME} start 99 $DEFAULT_START_RUNLEVEL . stop 99 $DEFAULT_STOP_RUNLEVEL .
+	  else
+	      [ -w ${RUNLEVEL_DIR}/rc2.d ] && ${LN} -sf ${RELATIVE_BOOT_INSTALL}/${DRIVER_NAME} ${RUNLEVEL_DIR}/rc2.d/S99${DRIVER_NAME}
+	      [ -w ${RUNLEVEL_DIR}/rc3.d ] && ${LN} -sf ${RELATIVE_BOOT_INSTALL}/${DRIVER_NAME} ${RUNLEVEL_DIR}/rc3.d/S99${DRIVER_NAME}
+	      [ -w ${RUNLEVEL_DIR}/rc4.d ] && ${LN} -sf ${RELATIVE_BOOT_INSTALL}/${DRIVER_NAME} ${RUNLEVEL_DIR}/rc4.d/S99${DRIVER_NAME}
+	      [ -w ${RUNLEVEL_DIR}/rc5.d ] && ${LN} -sf ${RELATIVE_BOOT_INSTALL}/${DRIVER_NAME} ${RUNLEVEL_DIR}/rc5.d/S99${DRIVER_NAME}
+	  fi
+	else
+	  print_nnl "WARNING: unable to create symlinks ... "
+	fi
+	print_msg "done."
+}
+
+s=$(($query_boot_script + $install_boot_script + $uninstall_boot_script))
+
+if [ $s -gt 1 ]; then
+	print_err "Choose one option only: -q | -i | -u"
+	exit 1 
+fi
+
+set_environment
+if [ $install_boot_script -eq 1 -o $uninstall_boot_script -eq 1 ]; then
+	check_root
+fi
+
+if [ $query_boot_script -eq 1 ]; then
+	run_query_boot_script
+	exit
+fi
+if [ $install_boot_script -eq 1 ]; then
+	run_install_boot_script
+	exit
+fi
+if [ $uninstall_boot_script -eq 1 ]; then
+	run_uninstall_boot_script
+	exit
+fi
+
+exit 0

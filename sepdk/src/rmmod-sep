@@ -1,0 +1,509 @@
+#!/bin/sh
+
+#
+# File: rmmod-sep
+#
+# Description: script to unload SEP driver
+#
+# Version: 1.9
+#
+#     Copyright (C) 2005-2018 Intel Corporation.  All Rights Reserved.
+#
+#     This file is part of SEP Development Kit
+#
+#     SEP Development Kit is free software; you can redistribute it
+#     and/or modify it under the terms of the GNU General Public License
+#     version 2 as published by the Free Software Foundation.
+#
+#     SEP Development Kit is distributed in the hope that it will be useful,
+#     but WITHOUT ANY WARRANTY; without even the implied warranty of
+#     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#     GNU General Public License for more details.
+#
+#     You should have received a copy of the GNU General Public License
+#     along with SEP Development Kit; if not, write to the Free Software
+#     Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+#
+#     As a special exception, you may use this file as part of a free software
+#     library without restriction.  Specifically, if other files instantiate
+#     templates or use macros or inline functions from this file, or you compile
+#     this file and link it with other files to produce an executable, this
+#     file does not by itself cause the resulting executable to be covered by
+#     the GNU General Public License.  This exception does not however
+#     invalidate any other reasons why the executable file might be covered by
+#     the GNU General Public License.
+#
+
+# ------------------------------ CONSTANTS -----------------------------------
+
+# basic name of driver
+DRIVER_NAME=sep5
+
+# ------------------------------- OUTPUT -------------------------------------
+
+print_msg()
+{
+    MSG="$*"
+    echo "$MSG"
+}
+
+print_nnl()
+{
+    MSG="$*"
+    echo -n "$MSG"
+}
+
+print_err()
+{
+    MSG="$*"
+    if [ -w /dev/stderr ] ; then
+        echo "$MSG" >> /dev/stderr
+    else
+        echo "$MSG"
+    fi
+}
+
+# set the path to include "standard" locations so commands below can be found
+PATH="/sbin:/usr/sbin:/bin:/usr/bin/:/usr/local/sbin:/usr/local/bin:/usr/local/gnu/bin:"${PATH}":."
+export PATH
+
+# --------------------------------- FUNCTIONS --------------------------------
+
+# function to show usage and exit
+print_usage_and_exit()
+{
+    err=${1:-0}
+    print_msg ""
+    print_msg "Usage: $0 [ options ]"
+    print_msg ""
+    print_msg " where \"options\" are the following:"
+    print_msg ""
+    print_msg "    -r | -remove-driver"
+    print_msg "      removes the driver specified by the user."
+    print_msg "      e.g.: ./rmmod-sep -r <driver1>[,<driver2>,...]"
+    print_msg ""
+    print_msg "    -R | --remove-all-drivers"
+    print_msg "      removes all the loaded old version SEP drivers along with the current version."
+    print_msg ""
+    print_msg "    -re | --restricted-environment"
+    print_msg "      restricted environment mode: minimal requirements to the system runtime"
+    print_msg "      like in busybox case"
+    print_msg ""
+    exit $err
+}
+
+get_socperf_driver_name()
+{
+    for driver in ${DRIVERS_TO_CHECK} ; do
+        socperf_driver_name=$( ${LSMOD} | ${GREP} socperf | ${GREP} -w ${driver} | ${CUT} -d' ' -f1 )
+        if [ -n "${socperf_driver_name}" ] ; then
+            socperf_driver_name_option="${socperf_driver_name_option}${socperf_driver_name},"
+        fi
+    done
+    # remove the trailing comma
+    socperf_driver_name_option=${socperf_driver_name_option%,*}
+
+    if [ -n "${socperf_driver_name_option}" ] ; then
+        # remove duplicates if any
+        socperf_driver_name_option=$( echo ${socperf_driver_name_option} | ${TR} ',' '\n' | ${SORT} -u | ${TR} '\n' ',' )
+        # remove the trailing comma
+        socperf_driver_name_option=${socperf_driver_name_option%,*}
+
+        SOCPERF_OPTIONS="${SOCPERF_OPTIONS} ${socperf_driver_name_option}"
+    else
+        # this means no valid socperf driver was found assocaited with -r <sep> option
+        # rmmod-socperf script will automatically take care of an empty value with -r option
+        # by priting out an error message
+        # to avoid confusing the users, let's not call rmmod-socperf if this is empty
+        # most common scenario: incorrect sep driver name given with -s option (./rmmod-sep sep99 -s)
+        DO_NOT_UNLOAD_SOCPERF=1
+    fi
+}
+
+init_variables()
+{
+    socperf_driver_name_option=""
+
+    if [ -n "${remove_all_drivers}" ] ; then
+        DRIVERS_TO_CHECK=$( ${LSMOD} | ${CUT} -f1 -d' ' | ${GREP} -E '^sep[0-9][_]*[0-9]*$|^sepint[0-9]_[0-9]+$' | ${TR} '\n' ' ' )
+        # usage of -R will cripple us from finding the dependent socperf library in case of sep driver load failure
+        # hence using -r option
+        SOCPERF_DRIVERS_TO_CHECK=$( ${LSMOD} | ${CUT} -f1 -d' ' | ${GREP} -E '^socperf[0-9][_]*[0-9]*$' | ${TR} '\n' ',' )
+        # remove the trailing comma
+        SOCPERF_DRIVERS_TO_CHECK=${SOCPERF_DRIVERS_TO_CHECK%,*}
+        if [ -z "${SOCPERF_DRIVERS_TO_CHECK}" ] ; then
+            DO_NOT_UNLOAD_SOCPERF=1
+        fi
+        SOCPERF_OPTIONS="-r ${SOCPERF_DRIVERS_TO_CHECK}"
+    elif [ -n "${remove_driver}" ] ; then
+        if [ -z "${ui_driver_name}" ] ; then
+            print_err ""
+            print_err "Error: provide a valid name for the driver to be removed ... exiting ..."
+            print_err
+            exit 1
+        fi
+        # remove double quotes if any
+        ui_driver_name=$( echo ${ui_driver_name} | ${SED} 's/"//g' )
+        # convert comma seprated values to array
+        DRIVERS_TO_CHECK=$( echo ${ui_driver_name} | ${TR} ',' ' ' )
+        SOCPERF_OPTIONS="-r"
+        get_socperf_driver_name
+    else
+        DRIVERS_TO_CHECK="${DRIVER_NAME}"
+        SOCPERF_OPTIONS=""
+    fi
+
+    # remove duplicates if any
+    if [ -n "${DRIVERS_TO_CHECK}" ] ; then
+        DRIVERS_TO_CHECK=$( echo ${DRIVERS_TO_CHECK} | ${TR} ' ' '\n' | ${SORT} -u | ${TR} '\n' ' ' )
+    fi
+}
+
+remove_driver_from_list()
+{
+    local driver_to_remove=$1
+    shift
+    local driver_list="$*"
+    local driver=""
+    local temp=""
+    for driver in ${driver_list} ; do
+        if [ "${driver}" != "${driver_to_remove}" ] ; then
+            if [ -z "${temp}" ] ; then
+                temp="${driver}"
+                continue
+            fi
+            temp="${temp} ${driver}"
+        fi
+    done
+    driver_list=${temp}
+
+    echo ${driver_list}
+}
+
+
+check_any_driver_presence()
+{
+    if [ -z "${DRIVERS_TO_CHECK}" ] ; then
+        print_msg ""
+        print_msg "Warning:  no sep drivers were found loaded in the kernel."
+        print_msg ""
+    fi
+
+    not_loaded_drivers=""
+    for driver in ${DRIVERS_TO_CHECK} ; do
+        DRIVER_LOADED=$( ${LSMOD} | ${CUT} -d ' ' -f 1 | ${GREP} -w ${driver} )
+        if [ -z "${DRIVER_LOADED}" ] ; then
+            not_loaded_drivers="${not_loaded_drivers} ${driver}"
+            # remove unloaded driver from array
+            DRIVERS_TO_CHECK=$( remove_driver_from_list ${driver} ${DRIVERS_TO_CHECK} )
+        fi
+    done
+
+    # if any of the given drivers are not loaded, print out the names
+    if [ -n "${not_loaded_drivers}" ] ; then
+        print_msg ""
+        print_msg "Warning:  the following driver(s) were not found loaded in the kernel: ${not_loaded_drivers}."
+        print_msg ""
+    fi
+
+}
+
+check_user_type()
+{
+    if [ -z "${BUSYBOX_SHELL}" ] ; then
+        if [ "${USER}x" != "rootx" ] ; then
+            if [ ! -w /dev ] ; then
+                print_msg "NOTE:  super-user or \"root\" privileges are required in order to continue."
+                print_nnl "Please enter \"root\" "
+                exec ${SU} -c "/bin/sh ${SCRIPT} ${OPTIONS}"
+                print_msg ""
+                exit 0
+            fi
+        fi
+    fi
+}
+
+remove_config_files()
+{
+    if [ -f "${VARLOG_DIR}/${DRIVER_NAME}/dmi_config.txt" ]; then
+        `${RM} -r ${SEP_FORCE} ${VARLOG_DIR}/${DRIVER_NAME}`
+    fi
+}
+
+shutdown_processes()
+{
+    SEP_PROCESSES="sep emon"
+    SHUTDOWN_SUCCEEDED=1
+    for i in ${SEP_PROCESSES} ; do
+        if [ -z "${BUSYBOX_SHELL}" ] ; then
+            PLIST=`${PGREP} -l -x $i`
+            if [ -n "${PLIST}" ] ; then
+                print_msg "Shutting down the following $i process(es):"
+                print_nnl "${PLIST} "
+                ${PKILL} -x $i
+                sleep 2
+                ${PKILL} -x $i
+                sleep 1
+                PLIST=`${PGREP} -l -x $i`
+                if [ -n "${PLIST}" ] ; then
+                    print_msg " -- shutdown FAILED"
+                    SHUTDOWN_SUCCEEDED=0
+                else
+                    print_msg ""
+                fi
+            fi
+        else
+            PLIST=`ps | ${GREP} -w "\s$i\s" | ${GREP} -v grep | ${CUT} -d ' ' -f 2`
+            if [ -n "${PLIST}" ] ; then
+                print_msg "Shutting down the following $i process(es):"
+                print_nnl "${PLIST} "
+                kill ${PLIST}
+                sleep 2
+                PLIST=`ps | ${GREP} -w "\s$i\s" | ${GREP} -v grep`
+                if [ -n "${PLIST}" ] ; then
+                    print_msg " -- shutdown FAILED"
+                    SHUTDOWN_SUCCEEDED=0
+                else
+                    print_msg ""
+                fi
+            fi
+        fi
+    done
+
+    # if any driver processes are still running, exit with error
+    if [ ${SHUTDOWN_SUCCEEDED} -eq 0 ] ; then
+        print_err ""
+        print_err "ERROR:  The above process(es) must be shutdown before unloading the driver."
+        print_err ""
+        exit 245
+    fi
+}
+
+rm_dependent_socperf_driver_from_option()
+{
+    socperf_driver_to_remove=""
+    if [ -n "${DO_NOT_UNLOAD_SOCPERF}" ] ; then
+        return
+    fi
+
+    socperf_driver_to_remove=$( ${LSMOD} | ${GREP} socperf | ${GREP} -w $1 | ${CUT} -d' ' -f1 )
+    if [ -n "${socperf_driver_to_remove}" ] ; then
+        socperf_driver_name_option=$( echo ${socperf_driver_name_option} | ${TR} ',' ' ')
+        socperf_driver_name_option=$( remove_driver_from_list ${socperf_driver_to_remove} ${socperf_driver_name_option} )
+        socperf_driver_name_option=$( echo ${socperf_driver_name_option} | ${TR} ' ' ',')
+
+        if [ -n "${socperf_driver_name_option}" ] ; then
+            SOCPERF_OPTIONS="-r ${socperf_driver_name_option}"
+        else
+            # this means no valid socperf driver was found assocaited with -r <sep> option
+            # rmmod-socperf script will automatically take care of an empty value with -r option
+            # by priting out an error message
+            # to avoid confusing the users, let's not call rmmod-socperf if this is empty
+            # most common scenario: incorrect sep driver name given with -s option (./rmmod-sep sep99 -s)
+            DO_NOT_UNLOAD_SOCPERF=1
+        fi
+    fi
+}
+
+unload_sep_driver()
+{
+    for driver in ${DRIVERS_TO_CHECK} ; do
+        DRIVER_LOADED=$( ${LSMOD} | ${CUT} -d ' ' -f 1 | ${GREP} -w ${driver} )
+
+        # this check is reduntant now since we are removing unloaded drivers at
+        # check_any_driver_presence.
+        # keeping this check as an extra measure though
+        if [ -n "${DRIVER_LOADED}" ] ; then
+            print_nnl "Removing ${DRIVER_LOADED} driver from the kernel ... "
+            sleep 2
+            ${RMMOD} ${DRIVER_LOADED}
+            RMMOD_RESULT=$?
+            if [ ${RMMOD_RESULT} -ne 0 ] ; then
+                # remove dependent socperf driver (of the unload failed sep driver) from socperf options
+                rm_dependent_socperf_driver_from_option ${DRIVER_LOADED}
+                print_err ""
+                print_err "Error:  unable to remove ${DRIVER_LOADED} driver from the kernel ..."
+                if [ -n "${socperf_driver_to_remove}" ] ; then
+                    print_err "        dependent driver ${socperf_driver_to_remove} will not be removed ..."
+                fi
+                print_err ""
+                error_on_removing=1
+                continue
+            else
+                atleast_one_removed=1
+            fi
+            print_msg "done."
+
+            # remove SEP base and percpu devices that were created by insmod script
+            if [ -e /dev/${DRIVER_LOADED} ] ; then
+                print_nnl "Deleting /dev/${DRIVER_LOADED} devices ... "
+                sleep 1
+                ${RM} -r ${SEP_FORCE} /dev/${DRIVER_LOADED}
+                print_msg "done."
+            fi
+
+            # show which SEP driver was unloaded
+            print_msg "The ${DRIVER_LOADED} driver has been successfully unloaded."
+        fi
+
+    done
+
+}
+
+
+unload_socperf_driver()
+{
+     if [ -n "${DO_NOT_UNLOAD_SOCPERF}" ] ; then
+        return
+    fi
+
+    if [ -d "${SCRIPT_DIR}/socperf" ] ; then
+        socperfdir=${SCRIPT_DIR}/socperf
+    fi
+    if [ -d "${socperfdir}" ] ; then
+        (sh ${socperfdir}/src/rmmod-socperf ${SOCPERF_OPTIONS})
+        err=$?
+        if [ $err -eq 247 ] ; then
+            print_msg "Warning: socperf driver not unloaded."
+            exit 247
+        fi
+        if [ $err -ne 0 ] ; then
+            exit $err
+        fi
+    fi
+}
+
+
+# ------------------------------ PARSING ------------------------------------
+
+# check for certain options
+OPTIONS=""
+while [ $# -gt 0 ] ; do
+    case "$1" in
+        -h | --help)
+            print_usage_and_exit 0
+            ;;
+        -r | -remove-driver)
+            remove_driver=1
+            if [ -n "$2" ] ; then
+                ui_driver_name=$2
+                OPTIONS="$OPTIONS -r $2"
+                shift
+            fi
+            ;;
+        -R | --remove-all-drivers)
+            remove_all_drivers=1
+            OPTIONS="$OPTIONS -R"
+            ;;
+        -re | --restricted-environment)
+            BUSYBOX_SHELL=yes
+            ;;
+        *)
+            print_err ""
+            print_err "ERROR: unrecognized option \"$1\""
+            print_usage_and_exit 254
+            ;;
+    esac
+    shift
+done
+
+# ------------------------------ COMMANDS ------------------------------------
+
+CUT="cut"
+GREP="grep"
+INSMOD="insmod"
+LSMOD="lsmod"
+PGREP="pgrep"
+PKILL="pkill"
+RM="rm"
+RMMOD="rmmod"
+SED="sed"
+SU="su"
+TR="tr"
+UNAME="uname"
+WHICH="which"
+SORT="sort"
+
+COMMANDS_TO_CHECK="${CUT} ${GREP} ${INSMOD} ${LSMOD} ${RM} ${RMMOD} ${SED} ${TR} ${UNAME} ${SORT}"
+
+#
+# Note: Busybox has a restricted shell environment, and
+#       conventional system utilities may not be present;
+#       so need to account for this ...
+# Note: Restricted environment mode can be forced by the option -re
+#       in case user may not know about the Busybox
+#
+
+# busybox binary check
+if [ -z "${BUSYBOX_SHELL}" ]; then
+    # if not forced by command line option -re then check it
+    BUSYBOX_SHELL=` ${GREP} --help 2>&1 | ${GREP} BusyBox`
+fi
+
+if [ -z "${BUSYBOX_SHELL}" ] ; then
+    COMMANDS_TO_CHECK="${PGREP} ${PKILL} ${SU} ${COMMANDS_TO_CHECK}"
+fi
+
+# if any of the COMMANDS_TO_CHECK are not executable, then exit script
+OK="true"
+for c in ${COMMANDS_TO_CHECK} ; do
+    CMD=`${WHICH} $c 2>&1` ;
+    if [ -z "${CMD}" ] ; then
+        OK="false"
+        print_err "ERROR: unable to find command \"$c\" !"
+    fi
+done
+if [ ${OK} != "true" ] ; then
+    print_err "If you are using BusyBox, please re-run this script with the '-re' flag added"
+    print_err "Otherwise, please add the above commands to your PATH and re-run the script ... exiting."
+    exit 255
+fi
+
+# ------------------------------ VARIABLES -----------------------------------
+
+SCRIPT=$0
+PLATFORM=`${UNAME} -m`
+KERNEL_VERSION=`${UNAME} -r`
+
+# set the directory of the rmmod-sep script
+SCRIPT_DIR=`dirname $0`
+SEP_SHELL=
+SEP_FORCE=-f
+
+if [ -n "${BUSYBOX_SHELL}" ] ; then
+   SEP_SHELL=sh
+   SEP_FORCE=
+fi
+
+VARLOG_DIR="/var/log"
+
+# --------------------------------- MAIN -------------------------------------
+
+# initialize variables
+init_variables
+
+# check for a loaded driver (should be only one)
+check_any_driver_presence
+
+# check if USER is root
+check_user_type
+
+# remove acpi and smbios config files
+remove_config_files
+
+# shutdown any currently running SEP processes
+shutdown_processes
+
+# if SEP driver is loaded, then attempt to remove it
+unload_sep_driver
+
+# if SocPerf driver is loaded, then attempt to remove it
+unload_socperf_driver
+
+
+# if atleast one SEP driver fails to be removed return error
+if [ -n "${error_on_removing}" ] ; then
+    exit 246
+fi
+
+exit 0

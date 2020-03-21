@@ -1,0 +1,7 @@
+sepagent
+*.la
+*.ko
+*.a
+*.so
+*.o
+*.cmd

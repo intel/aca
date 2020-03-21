@@ -1,0 +1,612 @@
+#!/bin/sh
+
+#
+# File: insmod-sep
+#
+# Description: script to load SEP driver
+#
+# Version: 1.11
+#
+# Copyright (C) 2008-2018 Intel Corporation.  All Rights Reserved.
+#
+#     This file is part of SEP Development Kit
+#
+#     SEP Development Kit is free software; you can redistribute it
+#     and/or modify it under the terms of the GNU General Public License
+#     version 2 as published by the Free Software Foundation.
+#
+#     SEP Development Kit is distributed in the hope that it will be useful,
+#     but WITHOUT ANY WARRANTY; without even the implied warranty of
+#     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#     GNU General Public License for more details.
+#
+#     You should have received a copy of the GNU General Public License
+#     along with SEP Development Kit; if not, write to the Free Software
+#     Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+#
+#     As a special exception, you may use this file as part of a free software
+#     library without restriction.  Specifically, if other files instantiate
+#     templates or use macros or inline functions from this file, or you compile
+#     this file and link it with other files to produce an executable, this
+#     file does not by itself cause the resulting executable to be covered by
+#     the GNU General Public License.  This exception does not however
+#     invalidate any other reasons why the executable file might be covered by
+#     the GNU General Public License.
+#
+
+# ------------------------------ CONSTANTS -----------------------------------
+
+# basic name of driver
+DRIVER_NAME=sep5
+# name of rmmod script
+RMMOD_SCRIPT=rmmod-sep
+# default driver device group
+DEFAULT_GROUP=${GROUP:-vtune}
+# backup group in case group creation fails
+BACKUP_GROUP=root
+# default driver device permissions
+DEFAULT_PERMS=660
+# permissions for driver device directory
+DIR_PERMS=775
+
+# ------------------------------- OUTPUT -------------------------------------
+
+print_msg()
+{
+  MSG="$*"
+  echo "$MSG"
+}
+
+print_nnl()
+{
+  MSG="$*"
+  echo -n "$MSG"
+}
+
+print_err()
+{
+  MSG="$*"
+  if [ -w /dev/stderr ]; then
+      if [ ! -S /dev/stderr ] ; then
+          echo "$MSG" >> /dev/stderr
+      else
+          echo "$MSG" >&2
+      fi
+  else
+    echo "$MSG"
+  fi
+}
+
+# set the path to include "standard" locations so commands below can be found
+PATH="/sbin:/usr/sbin:/usr/local/sbin:/bin:/usr/bin/:/usr/local/sbin:/usr/local/bin:/usr/local/gnu/bin:"${PATH}""
+export PATH
+# ------------------------------ COMMANDS ------------------------------------
+
+CHGRP="chgrp"
+CHMOD="chmod"
+CUT="cut"
+DIRNAME="dirname"
+GREP="grep"
+INSMOD="insmod"
+LSMOD="lsmod"
+MKDIR="mkdir"
+RM="rm"
+SED="sed"
+STAT="stat"
+SU="su"
+TR="tr"
+UNAME="uname"
+WHICH="which"
+CAT="cat"
+GROUPMOD="groupmod"
+YPCAT="ypcat"
+GROUPADD="groupadd"
+MODINFO="modinfo"
+
+COMMANDS_TO_CHECK="${CUT} ${DIRNAME} ${GREP} ${INSMOD} ${LSMOD} ${MKDIR} ${RM} ${SED} ${TR} ${UNAME} ${WHICH} ${CAT}"
+
+
+# ------------------------------ FUNCTIONS -----------------------------------
+
+max_cpu_list=`${CAT} /sys/devices/system/cpu/present`
+max_cpu_temp=${max_cpu_list##*-}
+max_cpu=${max_cpu_temp##*,}
+num_cpus=$(seq 0 $max_cpu)
+num_packages=`${GREP} "physical id" /proc/cpuinfo | tail -1 | ${CUT} -d ":" -f2 | ${CUT} -d " " -f2`
+family=`${GREP} -m1 "family"  /proc/cpuinfo  | ${CUT} -d ":" -f2 | ${CUT} -d " " -f2`
+model=`${GREP} -m1 "model"    /proc/cpuinfo  | ${CUT} -d ":" -f2 | ${CUT} -d " " -f2`
+
+# function to show usage and exit
+print_usage_and_exit()
+{
+  err=${1:-0}
+  print_msg ""
+  print_msg "Usage: $0 [ options ]"
+  print_msg ""
+  print_msg " where \"options\" are the following:"
+  print_msg ""
+  print_msg "    -g | --group group"
+  print_msg "      restricts access to the ${DRIVER_NAME} driver to users in the specified"
+  print_msg "      group; if this option is not provided, the group \"${DEFAULT_GROUP}\""
+  print_msg "      will be used"
+  print_msg ""
+  print_msg "    -p | --perms fileperms"
+  print_msg "      restricts access to the ${DRIVER_NAME} driver based on the specified"
+  print_msg "      file permissions; if this option is not provided, then file"
+  print_msg "      permissions \"${DEFAULT_PERMS}\" (or equivalently, \"ug+rw\") will be used"
+  print_msg ""
+  print_msg "    -q | --query"
+  print_msg "      returns 0 if driver is already loaded, non-zero otherwise;"
+  print_msg "      if driver is loaded, information on group ownership"
+  print_msg "      and file permissions on driver device will be displayed"
+  print_msg ""
+  print_msg "    -r | --reload"
+  print_msg "      attempt to reload all relevant drivers; note that drivers will"
+  print_msg "      not unload if they are still in use"
+  print_msg ""
+  print_msg "    -pu | --per-user"
+  print_msg "      install the sampling driver in secure mode to enable per user collection"
+  print_msg ""
+  print_msg "    -re | --restricted-environment"
+  print_msg "      restricted environment mode: minimal requirements to the system runtime"
+  print_msg "      like in busybox case"
+  print_msg ""
+  exit $err
+}
+
+# set the directory of the insmod-sep script
+SCRIPT_DIR=`dirname $0`
+SEP_SHELL=
+SEP_FORCE=-f
+
+VARLOG_DIR="/var/log"
+
+
+if [ -n "${BUSYBOX_SHELL}" ] ; then
+   SEP_SHELL=sh
+   SEP_FORCE=
+fi
+
+if [ -d "${SCRIPT_DIR}/socperf" ] ; then
+    socperfdir="${SCRIPT_DIR}/socperf"
+fi
+
+# check for certain options
+reload_driver=0
+while [ $# -gt 0 ] ; do
+  case "$1" in
+    -h | --help)
+      print_usage_and_exit 0
+      ;;
+    -g | --group)
+      DRIVER_GROUP=$2
+      if [ -z "$DRIVER_GROUP" ] ; then
+        print_err ""
+        print_err "ERROR: must provide a group"
+        print_usage_and_exit 254
+      fi
+      shift
+      ;;
+    -pu | --per-user)
+      SEP_PER_USER=-pu
+      ;;
+    -p | --perms)
+      DRIVER_PERMS=$2
+      if [ -z "$DRIVER_PERMS" ] ; then
+        print_err ""
+        print_err "ERROR: must provide the file permissions"
+        print_usage_and_exit 254
+      fi
+      shift
+      ;;
+    -q | --query)
+      (${SEP_SHELL} ${socperfdir}/src/insmod-socperf -q)
+      err_socperf=$?
+      err_s=0
+      driver_loaded=`${LSMOD} | ${GREP} ${DRIVER_NAME} | ${GREP} -v ${DRIVER_NAME}_`
+      if [ -z "$driver_loaded" ] ; then
+        err_s=213
+        print_msg "${DRIVER_NAME} driver is not loaded."
+      else
+        # below is for non-BUSYBOX case ... need to handle BUSYBOX case too ...
+        if [ -e /dev/${DRIVER_NAME}/c ] ; then
+          # get group and perms of base controller device
+          drv_group_c=`${STAT} -c "%G" /dev/${DRIVER_NAME}/c`
+          drv_perms_c=`${STAT} -c "%a" /dev/${DRIVER_NAME}/c`
+          # compare against group and perms of module devices
+          drv_group=`${STAT} -c "%G" /dev/${DRIVER_NAME}/m`
+          if [ "$drv_group" != "$drv_group_c" ] ; then
+            err_s=215
+          fi
+          drv_perms=`${STAT} -c "%a" /dev/${DRIVER_NAME}/m`
+          if [ "$drv_perms" != "$drv_perms_c" ] ; then
+            err_s=215
+          fi
+          # compare against group and perms of the percpu devices
+          for minor_no in $num_cpus
+          do
+            drv_group=`${STAT} -c "%G" /dev/${DRIVER_NAME}/s${minor_no}`
+            if [ "$drv_group" != "$drv_group_c" ] ; then
+              err_s=215
+            fi
+            drv_perms=`${STAT} -c "%a" /dev/${DRIVER_NAME}/s${minor_no}`
+            if [ "$drv_perms" != "$drv_perms_c" ] ; then
+              err_s=215
+            fi
+          done
+          # check if there were any group or perms mismatches in driver devices
+          if [ $err_s -eq 215 ] ; then
+            print_msg "${DRIVER_NAME} driver is loaded but not all subdevices are owned by group \"${drv_group}\" with file permissions \"${drv_perms}\"."
+          else
+            print_msg "${DRIVER_NAME} driver is loaded and owned by group \"${drv_group}\" with file permissions \"${drv_perms}\"."
+          fi
+        else
+          err_s=213
+          print_msg "${DRIVER_NAME} driver is not correctly loaded."
+        fi
+      fi
+      if [ $err_s -eq 0 ] ; then
+        err=0        # both drivers are loaded
+      else
+        err=err_s      # neither driver is loaded
+      fi
+      exit $err
+      ;;
+    -r | --reload)
+      reload_driver=1
+      ;;
+    -re | --restricted-environment)
+      BUSYBOX_SHELL=yes
+      ;;
+    *)
+      print_err ""
+      print_err "ERROR: unrecognized option \"$1\""
+      print_usage_and_exit 254
+      ;;
+  esac
+  shift
+done
+
+#
+# Note: Busybox has a restricted shell environment, and
+#       conventional system utilities may not be present;
+#       so need to account for this ...
+#
+
+# busybox binary check
+if [ -z "${BUSYBOX_SHELL}" ]; then
+  # if not forced by command line option -re then check it
+  BUSYBOX_SHELL=` ${GREP} --help 2>&1 | ${GREP} BusyBox`
+fi
+
+
+if [ -n "${BUSYBOX_SHELL}" ] ; then
+  DEFAULT_GROUP=${GROUP:-0}
+  INSMOD_ADDITIONAL_OPTIONS="$INSMOD_ADDITIONAL_OPTIONS -re"
+else
+  COMMANDS_TO_CHECK="${CHGRP} ${CHMOD} ${STAT} ${SU} ${COMMANDS_TO_CHECK}"
+fi
+
+# if any of the COMMANDS_TO_CHECK are not executable, then exit script
+OK="true"
+for c in ${COMMANDS_TO_CHECK} ; do
+  CMD=`${WHICH} $c 2>&1` ;
+  if [ -z "${CMD}" ] ; then
+    OK="false"
+    print_err "ERROR: unable to find command \"$c\" !"
+  fi
+done
+if [ ${OK} != "true" ] ; then
+  print_err "If you are using BusyBox, please re-run this script with the '-re' flag added"
+  print_err "Otherwise, please add the above commands to your PATH and re-run the script ... exiting."
+  exit 255
+fi
+
+
+
+# ------------------------------ VARIABLES -----------------------------------
+
+SCRIPT=$0
+PLATFORM=`${UNAME} -m`
+KERNEL_VERSION=`${UNAME} -r`
+PLATFORM=`${UNAME} -m`
+DRIVER_DIRECTORY=`${DIRNAME} ${SCRIPT}`
+# use existing driver group and device permissions as default if available
+if [ -e /dev/${DRIVER_NAME} ] && [ -z "${BUSYBOX_SHELL}" ] ; then
+  drv_group=`${STAT} -c "%G" /dev/${DRIVER_NAME}`
+  drv_perms=`${STAT} -c "%a" /dev/${DRIVER_NAME}`
+else
+  drv_group=${DEFAULT_GROUP}
+  drv_perms=${DEFAULT_PERMS}
+fi
+DRIVER_GROUP=${DRIVER_GROUP:-${drv_group}}
+DRIVER_PERMS=${DRIVER_PERMS:-${drv_perms}}
+
+# create a group if the group does not exist
+# check if local group exists
+${GROUPMOD} ${DRIVER_GROUP} > /dev/null 2>&1
+verifygroup_err=$?
+if [ ${verifygroup_err} -ne 0 ] ; then
+  # check if nis group exists
+  ${YPCAT} group 2> /dev/null | ${CUT} -d : -f1 | ${GREP} -E "^${DRIVER_GROUP}$" > /dev/null 2>&1
+  verifygroup_err=$?
+  if [ ${verifygroup_err} -ne 0 ] ; then
+    getent group 2> /dev/null | ${GREP} -E "^${DRIVER_GROUP}" > /dev/null 2>&1
+    verifygroup_err=$?
+    if [ ${verifygroup_err} -ne 0 ]; then
+      print_nnl "Creating group ${DRIVER_GROUP} ... "
+      ${GROUPADD} ${DRIVER_GROUP} > /dev/null 2>&1
+      verifygroup_err=$?
+      if [ ${verifygroup_err} -ne 0 ] ; then
+        print_msg ""
+        print_msg "Warning: ${DRIVER_GROUP} group creation failed ..."
+        DRIVER_GROUP=${BACKUP_GROUP}
+        print_msg "         proceeding with group ${DRIVER_GROUP} instead ..."
+        print_msg ""
+      else
+        print_msg "done"
+      fi
+    fi
+  fi
+fi
+
+# check if platform is supported
+if [ "${PLATFORM}" = "x86_64" ] ; then
+  ARCH="x32_64"
+elif [ "${PLATFORM}" = "i386" -o "${PLATFORM}" = "i486" -o "${PLATFORM}" = "i586" -o "${PLATFORM}" = "i686" ] ; then
+  ARCH="x32"
+else
+  print_err ""
+  print_err "ERROR: Unsupported platform \"${PLATFORM}\" ... exiting."
+  print_err ""
+  exit 253
+fi
+
+# check whether kernel is for UP or SMP
+SMP=`${UNAME} -v | ${GREP} SMP`
+if [ -z "${SMP}" ] ; then
+  ARITY="up"
+else
+  ARITY="smp"
+fi
+
+# file name of the driver to load
+DRIVER_FILENAME=${DRIVER_NAME}${SEP_PER_USER}-${ARCH}-${KERNEL_VERSION}${ARITY}.ko
+
+# ------------------------------- MAIN ---------------------------------------
+
+# check if OS is Clear Linux
+IS_CLEAR_LINUX_OS=0
+# Clear Linux SEP driver availability
+CL_DRIVER_AVAIL=0
+CLEAR_LINUX_OS_RELEASE="/usr/lib/os-release"
+if [ -f "${CLEAR_LINUX_OS_RELEASE}" ] ; then
+  ${CAT} ${CLEAR_LINUX_OS_RELEASE} | ${GREP} "Clear Linux" > /dev/null 2>&1
+  ret_val=$?
+  if [ ${ret_val} -eq 0 ] ; then
+    IS_CLEAR_LINUX_OS=1
+    CLEAR_LINUX_SEP_DRIVER_PATH=`${MODINFO} ${DRIVER_NAME} | ${GREP} filename | ${CUT} -d : -f2 | ${TR} -d "[:blank:]"`
+    if [ -f "${CLEAR_LINUX_SEP_DRIVER_PATH}" ] ; then
+      CL_DRIVER_AVAIL=1
+      DRIVER_DIRECTORY=`echo ${CLEAR_LINUX_SEP_DRIVER_PATH} | ${SED} -e "s/\/${DRIVER_NAME}.ko//g"`
+      DRIVER_FILENAME=${DRIVER_NAME}.ko
+    else
+      print_msg ""
+      print_msg "Warning: Clear Linux integrated ${DRIVER_NAME} driver \"${DRIVER_NAME}.ko\""
+      print_msg "was not found in directory \"${CLEAR_LINUX_DRIVER_DIRECTORY}\" !"
+      print_msg "Using ${DRIVER_NAME} driver in SEP package instead  ..."
+      print_msg ""
+    fi
+  fi
+fi
+
+# check if driver devices exist, and if so, then exit
+DEVNUM=`${GREP} ${DRIVER_NAME} /proc/devices | ${GREP} -v ${DRIVER_NAME}_ | ${TR} -s ' ' | ${CUT} -d ' ' -f 1`
+if [ -n "${DEVNUM}" ] ; then
+  if [ $reload_driver -ne 1 ] ; then
+    print_err ""
+    print_err "The ${DRIVER_NAME} driver is already loaded!  Use ${DRIVER_DIRECTORY}/${RMMOD_SCRIPT} to remove it."
+    print_err ""
+    exit 236
+  fi
+fi
+
+# check if USER is root
+if [ -z "${BUSYBOX_SHELL}" ] ; then
+  if [ "${USER}x" != "rootx" ] ; then
+    if [ ! -w /dev ] ; then
+      print_msg "NOTE:  super-user or \"root\" privileges are required in order to continue."
+      print_nnl "Please enter \"root\" "
+      OPTIONS="-g ${DRIVER_GROUP} -p ${DRIVER_PERMS} ${SEP_PER_USER}"
+      if [ $reload_driver -eq 1 ] ; then
+        OPTIONS="$OPTIONS -r"
+      fi
+      exec ${SU} -c "/bin/sh ${SCRIPT} ${OPTIONS}"
+      print_msg ""
+      exit 0
+    fi
+  fi
+fi
+
+if [ -f "${VARLOG_DIR}/${DRIVER_NAME}/dmi_config.txt" ]; then
+    `${RM} ${VARLOG_DIR}/${DRIVER_NAME}/dmi_config.txt`
+fi
+
+# the result of the below scripts are required only on KNL (87) and KNM (133)
+# the check for these are being done on the userland binaries
+if [ -d "/sys/firmware/dmi/entries/14-0" ]; then
+    if [ -f "${SCRIPT_DIR}/read_dmisysfs.py" ]; then
+        dmi_config=`python ${SCRIPT_DIR}/read_dmisysfs.py 2> /dev/null`
+        str=`echo $dmi_config | ${GREP} "Mode="`
+        if [ "KK$str" != "KK" ]; then
+            ${MKDIR} -p ${VARLOG_DIR}/${DRIVER_NAME}
+            print_msg "$dmi_config" > ${VARLOG_DIR}/${DRIVER_NAME}/dmi_config.txt
+        fi
+    fi
+fi
+if [ -f "/sys/firmware/acpi/tables/SLIT" ]; then
+    if [ -f "${SCRIPT_DIR}/read_slitsysfs.py" ]; then
+        dmi_config=`python ${SCRIPT_DIR}/read_slitsysfs.py 2> /dev/null`
+        str=`echo $dmi_config | ${GREP} "num_proximity_domain="`
+        if [ "KK$str" != "KK" ]; then
+            ${MKDIR} -p ${VARLOG_DIR}/${DRIVER_NAME}
+            print_msg "$dmi_config" >> ${VARLOG_DIR}/${DRIVER_NAME}/dmi_config.txt
+        fi
+    fi
+fi
+if [ -f "/sys/firmware/acpi/tables/SRAT" ]; then
+    if [ -f "${SCRIPT_DIR}/read_sratsysfs.py" ]; then
+        dmi_config=`python ${SCRIPT_DIR}/read_sratsysfs.py 2> /dev/null`
+        str=`echo $dmi_config | ${GREP} "apic_id="`
+        if [ "KK$str" != "KK" ]; then
+            ${MKDIR} -p ${VARLOG_DIR}/${DRIVER_NAME}
+            print_msg "$dmi_config" >> ${VARLOG_DIR}/${DRIVER_NAME}/dmi_config.txt
+        fi
+    fi
+fi
+if [ -c "/dev/mem" ]; then
+    if [ -f "${SCRIPT_DIR}/read_smbios.py" ]; then
+        dmi_config=`python ${SCRIPT_DIR}/read_smbios.py 2> /dev/null`
+        str=`echo $dmi_config | ${GREP} "entry_point:"`
+        if [ "KK$str" != "KK" ]; then
+            ${MKDIR} -p ${VARLOG_DIR}/${DRIVER_NAME}
+            print_msg "$dmi_config" >> ${VARLOG_DIR}/${DRIVER_NAME}/dmi_config.txt
+        fi
+    fi
+fi
+
+# check whether to reload the driver
+if [ $reload_driver -eq 1 ] ; then
+  (${SEP_SHELL} ${SCRIPT_DIR}/${RMMOD_SCRIPT} -s)
+  err=$?
+  if [ $err -ne 0 ] ; then
+    print_err ""
+    print_err "Error: failed to reload ${DRIVER_NAME} driver"
+    print_err ""
+    exit $err
+  fi
+fi
+
+if [ ! -r ${DRIVER_DIRECTORY}/${DRIVER_FILENAME} ] ; then
+  print_err ""
+  print_err "Warning: ${DRIVER_NAME} driver \"${DRIVER_FILENAME}\""
+  print_err "was not found in directory \"${DRIVER_DIRECTORY}\" !"
+  print_err ""
+  print_err "This means you may need to build ${DRIVER_NAME} driver from the provided"
+  print_err "driver sources.  Please see the driver README for instructions."
+  print_err ""
+  exit 235
+fi
+
+
+# try to load the SocPerf driver if it was not already loaded
+if [ ${CL_DRIVER_AVAIL} -eq 0 ] ; then
+  if [ -d "${socperfdir}" ] ; then
+    print_nnl "Checking for socperf driver ... "
+    socperf_loaded=`${LSMOD} | ${CUT} -d ' ' -f 1| ${GREP} -E '\<socperf\>'`
+    if [ -z "$socperf_loaded" ] ; then
+      print_msg "not detected."
+      (${SEP_SHELL} ${socperfdir}/src/insmod-socperf -g $DRIVER_GROUP -p $DRIVER_PERMS $INSMOD_ADDITIONAL_OPTIONS)
+      err=$?
+      if [ $err -ne 0 ] ; then
+        exit 228
+      fi
+    else
+      print_msg "detected."
+    fi
+  fi
+fi
+# insmod command to execute
+INSMOD_CMD="${INSMOD} ${DRIVER_DIRECTORY}/${DRIVER_FILENAME}"
+
+# execute the command
+print_msg "Executing: ${INSMOD_CMD}"
+${INSMOD_CMD}
+INSMOD_RESULT=$?
+
+# this lets a system to handle all the device file creation
+sleep 1
+
+# abort if unable to load the driver
+if [ ${INSMOD_RESULT} -ne 0 ] ; then
+  print_err ""
+  print_err "Error:  ${DRIVER_NAME} driver failed to load!"
+  print_err ""
+  print_err "You may need to build ${DRIVER_NAME} driver for your kernel."
+  print_err "Please see the ${DRIVER_NAME} driver README for instructions."
+  print_err ""
+  exit 234
+fi
+
+# check if the driver has been loaded into the kernel
+DEVNUM=`${GREP} ${DRIVER_NAME} /proc/devices | ${GREP} -v ${DRIVER_NAME}_ | ${TR} -s ' ' | ${CUT} -d ' ' -f 1`
+if [ -z "${DEVNUM}" ] ; then
+  print_err ""
+  print_err "Error:  unable to find device \"${DRIVER_NAME}\" in /proc/devices !"
+  print_err ""
+  exit 233
+fi
+
+# check if the driver readers were created
+DEVNUM2=`${GREP} -w ${DRIVER_NAME}_s /proc/devices | ${TR} -s ' ' | ${CUT} -d ' ' -f 1`
+if [ -z "${DEVNUM2}" ] ; then
+  print_err ""
+  print_err "Error:  unable to find device \"${DRIVER_NAME}_s\" in /proc/devices !"
+  print_err ""
+  exit 233
+fi
+
+# check if the driver readers were created
+DEVNUM3=`${GREP} -w ${DRIVER_NAME}_b /proc/devices | ${TR} -s ' ' | ${CUT} -d ' ' -f 1`
+if [ -z "${DEVNUM3}" ] ; then
+  print_err ""
+  print_err "Error:  unable to find device \"${DRIVER_NAME}_b\" in /proc/devices !"
+  print_err ""
+  exit 233
+fi
+
+# check if the driver readers were created
+DEVNUM4=`${GREP} -w ${DRIVER_NAME}_u /proc/devices | ${TR} -s ' ' | ${CUT} -d ' ' -f 1`
+if [ -z "${DEVNUM4}" ] ; then
+  print_err ""
+  print_err "Error:  unable to find device \"${DRIVER_NAME}_u\" in /proc/devices !"
+  print_err ""
+  exit 233
+fi
+
+# change group ownership to whichever group is permitted to open the driver
+if [ -z "${BUSYBOX_SHELL}" ] ; then
+    if [ -z "${DRIVER_GROUP}" ] ; then
+      print_err ""
+      print_err "Error:  no group ownership specified for /dev/${DRIVER_NAME} devices ... exiting."
+      print_err ""
+      exit 231
+    fi
+    print_nnl "Setting group ownership of devices to group \"${DRIVER_GROUP}\" ... "
+    ${CHGRP} -R ${DRIVER_GROUP} /dev/${DRIVER_NAME}
+    CHGRP_RESULT=$?
+    if [ ${CHGRP_RESULT} -ne 0 ] ; then
+      print_err ""
+      print_err "Error:  unable to change group ownership of devices!"
+      print_err ""
+      exit 230
+    fi
+    print_msg "done."
+    print_nnl "Setting file permissions on devices to \"${DRIVER_PERMS}\" ... "
+    ${CHMOD} ${DIR_PERMS} /dev/${DRIVER_NAME}
+    ${CHMOD} ${DRIVER_PERMS} /dev/${DRIVER_NAME}/*
+    CHMOD_RESULT=$?
+    if [ ${CHMOD_RESULT} -ne 0 ] ; then
+      print_err ""
+      print_err "Error:  unable to change permissions to ${DRIVER_PERMS} on devices!"
+      print_err ""
+      exit 229
+    fi
+    print_msg "done."
+fi
+
+# show which driver was loaded
+print_msg "The ${DRIVER_NAME} driver has been successfully loaded."
+
+
+exit 0

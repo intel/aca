@@ -1,0 +1,64 @@
+#
+#    Copyright (C) 2019-2020 Intel Corporation.  All Rights Reserved.
+#
+#Permission is hereby granted, free of charge, to any person obtaining a copy
+#of this software and associated documentation files (the "Software"), to deal
+#in the Software without restriction, including without limitation the rights
+#to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+#copies of the Software, and to permit persons to whom the Software is
+#furnished to do so, subject to the following conditions:
+#
+#The above copyright notice and this permission notice shall be included in all
+#copies or substantial portions of the Software.
+#
+#THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+#IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+#FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+#AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+#LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+#OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+#SOFTWARE.
+#
+#
+#
+#
+#
+#
+#
+
+Validated on python 2.7
+
+Usage:
+    Target platform preparation.
+        Build test target application
+        > cd ./apps/target
+        > make
+        > cd -
+
+        Copy target application to the target
+        > scp ./apps/target/test user@target
+
+        Start application on target with number of cores specified (8 in the example)
+        > ssh user@target "./test -nt 8"
+
+        The application will give output like this:
+        > nt = 8
+        > dataSize = 0x10000
+        > Hotspot ip: 400AD1 : 4197073
+        > numberOfThreads = 8
+
+    Configuration:
+        The configuration file is located in ./config.py
+        You need to change it according you target machine. For example
+
+        def ApolloLakePremiumSKU(self):
+            self.cores_number = 8               # Number of cores the platform have
+            self.testapp = 'test'               # Name of test application. On some platforms may be used full path of application
+            self.testapp_hotspot_ip = 0x400AD1  # The ip take from target application
+            self.protocol_version = 6           # Internal protocol version
+
+    Testing:
+        Form directory with test run:
+        > python test.py 127.0.0.1 ApolloLakePremiumSKU
+
+        Where the configuration type is the same as in config.py
